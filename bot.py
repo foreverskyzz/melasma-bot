@@ -151,7 +151,6 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(site_callback))
-    # Schedule reminders every 20 minutes
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(check_reminders, interval=1200, first=0)
