@@ -1,10 +1,11 @@
 import os
 import sys
+import asyncio
 from datetime import datetime
 import pytz
 import requests
-from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 print("Starting bot...")
 
@@ -58,25 +59,25 @@ def supabase_upload_storage(bucket, file_name, file_bytes):
         print(f"Upload error: {e}")
         return None
 
-def start(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = supabase_select("users", {"telegram_chat_id": chat_id})
     if user:
-        update.message.reply_text("Welcome back! Send a photo.")
+        await update.message.reply_text("Welcome back! Send a photo.")
     else:
-        update.message.reply_text(
+        await update.message.reply_text(
             "Hi! Send me the names of your 5 melasma spots (comma separated).\n"
             "Example: Left cheek, Right cheek, Forehead, Upper lip, Chin"
         )
         context.user_data['awaiting_sites'] = True
 
-def handle_message(update, context):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text
     if context.user_data.get('awaiting_sites'):
         site_names = [s.strip() for s in text.split(',')]
         if len(site_names) != 5:
-            update.message.reply_text("Need exactly 5 names, separated by commas.")
+            await update.message.reply_text("Need exactly 5 names, separated by commas.")
             return
         supabase_insert("users", {
             'telegram_chat_id': chat_id,
@@ -84,31 +85,31 @@ def handle_message(update, context):
             'name': update.effective_user.full_name
         })
         del context.user_data['awaiting_sites']
-        update.message.reply_text("Sites saved! Send a photo, then tap which spot.")
+        await update.message.reply_text("Sites saved! Send a photo, then tap which spot.")
     else:
-        update.message.reply_text("Send /start")
+        await update.message.reply_text("Send /start")
 
-def handle_photo(update, context):
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = supabase_select("users", {"telegram_chat_id": chat_id})
     if not user:
-        update.message.reply_text("Please /start first.")
+        await update.message.reply_text("Please /start first.")
         return
     user = user[0]
     site_names = user['site_names']
-    photo_file = update.message.photo[-1].get_file()
+    photo_file = await update.message.photo[-1].get_file()
     file_name = f"{chat_id}_{datetime.utcnow().timestamp()}.jpg"
-    photo_bytes = photo_file.download_as_bytearray()
+    photo_bytes = await photo_file.download_as_bytearray()
     photo_url = supabase_upload_storage("melasma-photos", file_name, photo_bytes)
     if not photo_url:
-        update.message.reply_text("Upload failed. Try again.")
+        await update.message.reply_text("Upload failed. Try again.")
         return
     keyboard = [[InlineKeyboardButton(name, callback_data=f"site_{idx}_{photo_url}")] for idx, name in enumerate(site_names)]
-    update.message.reply_text("Which spot?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Which spot?", reply_markup=InlineKeyboardMarkup(keyboard))
 
-def site_callback(update, context):
+async def site_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    query.answer()
+    await query.answer()
     data = query.data
     parts = data.split('_')
     site_idx = int(parts[1])
@@ -122,11 +123,11 @@ def site_callback(update, context):
             'photo_url': photo_url
         })
         site_name = user[0]['site_names'][site_idx]
-        query.edit_message_text(f"Saved {site_name}. You can send another.")
+        await query.edit_message_text(f"Saved {site_name}. You can send another.")
     else:
-        query.edit_message_text("Error. /start again.")
+        await query.edit_message_text("Error. /start again.")
 
-def check_reminders(context):
+async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(pytz.UTC)
     if now.hour < 8 or now.hour >= 22:
         return
@@ -141,22 +142,22 @@ def check_reminders(context):
             for p in photos
         )
         if not has_photo_today:
-            context.bot.send_message(chat_id, "Time to document your melasma spots. Send a photo.")
+            await context.bot.send_message(chat_id, "Time to document your melasma spots. Send a photo.")
 
-def main():
-    print("Bot starting...")
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    dp.add_handler(MessageHandler(Filters.photo, handle_photo))
-    dp.add_handler(CallbackQueryHandler(site_callback))
-    jq = updater.job_queue
-    if jq:
-        jq.run_repeating(check_reminders, interval=1200, first=0)
-    updater.start_polling()
-    print("Bot is polling...")
-    updater.idle()
+async def main():
+    print("Bot starting (async)...")
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(CallbackQueryHandler(site_callback))
+    # Schedule reminders every 20 minutes
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_repeating(check_reminders, interval=1200, first=0)
+    else:
+        print("Warning: JobQueue not available.")
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
