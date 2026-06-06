@@ -1,14 +1,24 @@
-import time
+import os
+import sys
 from datetime import datetime
 import pytz
 import requests
 from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-import os
 
-# Supabase config from environment variables
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+print("Starting bot...")
+
+# Check environment variables
+required_vars = ["SUPABASE_URL", "SUPABASE_KEY", "BOT_TOKEN"]
+missing = [v for v in required_vars if not os.environ.get(v)]
+if missing:
+    print(f"ERROR: Missing environment variables: {missing}")
+    sys.exit(1)
+
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip('/')
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+
 HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -17,30 +27,45 @@ HEADERS = {
 
 def supabase_insert(table, data):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
-    requests.post(url, headers=HEADERS, json=data).raise_for_status()
+    try:
+        r = requests.post(url, headers=HEADERS, json=data)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"Insert error: {e}")
 
 def supabase_select(table, filters=None):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
-    params = {f"{col}": f"eq.{val}" for col, val in (filters or {}).items()}
-    resp = requests.get(url, headers=HEADERS, params=params)
-    resp.raise_for_status()
-    return resp.json()
+    params = {}
+    if filters:
+        for col, val in filters.items():
+            params[col] = f"eq.{val}"
+    try:
+        r = requests.get(url, headers=HEADERS, params=params)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"Select error: {e}")
+        return []
 
 def supabase_upload_storage(bucket, file_name, file_bytes):
     url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{file_name}"
     headers = {**HEADERS, "Content-Type": "image/jpeg"}
-    requests.post(url, headers=headers, data=file_bytes).raise_for_status()
-    return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{file_name}"
+    try:
+        r = requests.post(url, headers=headers, data=file_bytes)
+        r.raise_for_status()
+        return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{file_name}"
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return None
 
 def start(update, context):
     chat_id = update.effective_chat.id
     user = supabase_select("users", {"telegram_chat_id": chat_id})
     if user:
-        update.message.reply_text("Welcome back! Send a photo of a melasma spot.")
+        update.message.reply_text("Welcome back! Send a photo.")
     else:
         update.message.reply_text(
-            "Hi! This bot tracks your melasma treatment.\n\n"
-            "First, send me the names of your 5 spots as a list separated by commas.\n"
+            "Hi! Send me the names of your 5 melasma spots (comma separated).\n"
             "Example: Left cheek, Right cheek, Forehead, Upper lip, Chin"
         )
         context.user_data['awaiting_sites'] = True
@@ -51,7 +76,7 @@ def handle_message(update, context):
     if context.user_data.get('awaiting_sites'):
         site_names = [s.strip() for s in text.split(',')]
         if len(site_names) != 5:
-            update.message.reply_text("Please enter exactly 5 names separated by commas.")
+            update.message.reply_text("Need exactly 5 names, separated by commas.")
             return
         supabase_insert("users", {
             'telegram_chat_id': chat_id,
@@ -59,12 +84,9 @@ def handle_message(update, context):
             'name': update.effective_user.full_name
         })
         del context.user_data['awaiting_sites']
-        update.message.reply_text(
-            "Got it. From tomorrow at 8am UTC, I'll remind you daily.\n"
-            "Just send a photo and tap which spot it's for."
-        )
+        update.message.reply_text("Sites saved! Send a photo, then tap which spot.")
     else:
-        update.message.reply_text("Send /start to begin.")
+        update.message.reply_text("Send /start")
 
 def handle_photo(update, context):
     chat_id = update.effective_chat.id
@@ -78,8 +100,11 @@ def handle_photo(update, context):
     file_name = f"{chat_id}_{datetime.utcnow().timestamp()}.jpg"
     photo_bytes = photo_file.download_as_bytearray()
     photo_url = supabase_upload_storage("melasma-photos", file_name, photo_bytes)
+    if not photo_url:
+        update.message.reply_text("Upload failed. Try again.")
+        return
     keyboard = [[InlineKeyboardButton(name, callback_data=f"site_{idx}_{photo_url}")] for idx, name in enumerate(site_names)]
-    update.message.reply_text("Thanks. Which spot is this?", reply_markup=InlineKeyboardMarkup(keyboard))
+    update.message.reply_text("Which spot?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 def site_callback(update, context):
     query = update.callback_query
@@ -97,9 +122,9 @@ def site_callback(update, context):
             'photo_url': photo_url
         })
         site_name = user[0]['site_names'][site_idx]
-        query.edit_message_text(f"Saved photo for {site_name}. Send another or stop for today.")
+        query.edit_message_text(f"Saved {site_name}. You can send another.")
     else:
-        query.edit_message_text("Error. Please /start again.")
+        query.edit_message_text("Error. /start again.")
 
 def check_reminders(context):
     now = datetime.now(pytz.UTC)
@@ -119,7 +144,8 @@ def check_reminders(context):
             context.bot.send_message(chat_id, "Time to document your melasma spots. Send a photo.")
 
 def main():
-    updater = Updater(os.environ["BOT_TOKEN"], use_context=True)
+    print("Bot starting...")
+    updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
@@ -129,6 +155,7 @@ def main():
     if jq:
         jq.run_repeating(check_reminders, interval=1200, first=0)
     updater.start_polling()
+    print("Bot is polling...")
     updater.idle()
 
 if __name__ == "__main__":
