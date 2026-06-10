@@ -63,7 +63,21 @@ def start(update, context):
     name = update.effective_user.first_name
     user = supabase_select("users", {"telegram_chat_id": chat_id})
     if user:
-        update.message.reply_text("Welcome back! Send a photo.")
+        # Calculate current day number
+        local_tz = pytz.timezone('Asia/Shanghai')
+        now = datetime.now(local_tz)
+        start_date_str = user[0].get('start_date')
+        if start_date_str:
+            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).astimezone(local_tz)
+            days_since_start = (now.date() - start_date.date()).days
+            day_number = days_since_start + 1
+            if day_number < 1:
+                day_number = 1
+        else:
+            day_number = 1
+        update.message.reply_text(
+            f"Welcome back! Ready to send your photos for Day {day_number}? Just tap the upload button!"
+        )
     else:
         update.message.reply_text(
             f"Hello {name}, thank you for using Hyperbeam (tentative name for our fluocinolone acetonide, hydroquinone, and tretinoin cream).\n\n"
