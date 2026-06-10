@@ -126,7 +126,7 @@ def handle_photo(update, context):
     # Store photo_url in user_data temporarily
     context.user_data['temp_photo_url'] = photo_url
     keyboard = [[InlineKeyboardButton(name, callback_data=str(idx))] for idx, name in enumerate(site_names)]
-    update.message.reply_text("Which spot?", reply_markup=InlineKeyboardMarkup(keyboard))
+    update.message.reply_text("Which spot is this?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 def site_callback(update, context):
     query = update.callback_query
