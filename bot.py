@@ -6,7 +6,7 @@ import requests
 from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackQueryHandler, Filters
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-print("Starting bot v2...")
+print("Starting Hyperbeam Melasma Bot...")
 
 # Environment variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip('/')
@@ -30,7 +30,6 @@ def supabase_select(table, filters=None):
         for col, val in filters.items():
             params[col] = f"eq.{val}"
     try:
-        print(f"Selecting from {table} with filters {filters}")
         r = requests.get(url, headers=HEADERS, params=params)
         r.raise_for_status()
         return r.json()
@@ -41,12 +40,12 @@ def supabase_select(table, filters=None):
 def supabase_insert(table, data):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     try:
-        print(f"Inserting into {table}: {data}")
         r = requests.post(url, headers=HEADERS, json=data)
         r.raise_for_status()
-        print("Insert success")
+        return True
     except Exception as e:
         print(f"Insert error: {e}")
+        return False
 
 def supabase_upload_storage(bucket, file_name, file_bytes):
     url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{file_name}"
@@ -61,15 +60,15 @@ def supabase_upload_storage(bucket, file_name, file_bytes):
 
 def start(update, context):
     chat_id = update.effective_chat.id
-    print(f"Start command from chat_id: {chat_id}")
+    name = update.effective_user.first_name
     user = supabase_select("users", {"telegram_chat_id": chat_id})
     if user:
         update.message.reply_text("Welcome back! Send a photo.")
     else:
-        name = update.effective_user.first_name
         update.message.reply_text(
-            f"Hello {name}, thank you for using Hyperbeam...\n"
-            "Choose 5 places where you have dark spots and send their names (comma separated).\n"
+            f"Hello {name}, thank you for using Hyperbeam (tentative name for our fluocinolone acetonide, hydroquinone, and tretinoin cream).\n\n"
+            "Welcome onboard in documenting your journey with us in erasing dark spots (melasma).\n\n"
+            "Choose 5 places where you have dark spots and send their names to me (comma separated).\n"
             "Example: Left cheek, Right cheek, Forehead, Upper lip, Chin"
         )
         context.user_data['awaiting_sites'] = True
@@ -77,7 +76,6 @@ def start(update, context):
 def handle_message(update, context):
     chat_id = update.effective_chat.id
     text = update.message.text
-    print(f"Message from {chat_id}: {text}")
     if context.user_data.get('awaiting_sites'):
         site_names = [s.strip() for s in text.split(',')]
         if len(site_names) != 5:
@@ -89,13 +87,15 @@ def handle_message(update, context):
             'name': update.effective_user.full_name
         })
         del context.user_data['awaiting_sites']
-        update.message.reply_text("Sites saved! Send a photo, then tap which spot.")
+        update.message.reply_text(
+            "Sites saved! Tomorrow at 8am your local time will be Day 1 of your journey.\n\n"
+            "Send me a photo, then tap which spot it's for."
+        )
     else:
-        update.message.reply_text("Send /start")
+        update.message.reply_text("Send /start to begin.")
 
 def handle_photo(update, context):
     chat_id = update.effective_chat.id
-    print(f"Photo from chat_id: {chat_id}")
     user = supabase_select("users", {"telegram_chat_id": chat_id})
     if not user:
         update.message.reply_text("Please /start first.")
@@ -109,16 +109,19 @@ def handle_photo(update, context):
     if not photo_url:
         update.message.reply_text("Upload failed. Try again.")
         return
-    keyboard = [[InlineKeyboardButton(name, callback_data=f"site_{idx}_{photo_url}")] for idx, name in enumerate(site_names)]
+    # Store photo_url in user_data temporarily
+    context.user_data['temp_photo_url'] = photo_url
+    keyboard = [[InlineKeyboardButton(name, callback_data=str(idx))] for idx, name in enumerate(site_names)]
     update.message.reply_text("Which spot?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 def site_callback(update, context):
     query = update.callback_query
     query.answer()
-    data = query.data
-    parts = data.split('_')
-    site_idx = int(parts[1])
-    photo_url = '_'.join(parts[2:])
+    site_idx = int(query.data)
+    photo_url = context.user_data.get('temp_photo_url')
+    if not photo_url:
+        query.edit_message_text("Error: no photo found. Please send again.")
+        return
     chat_id = query.message.chat.id
     user = supabase_select("users", {"telegram_chat_id": chat_id})
     if user:
@@ -128,7 +131,9 @@ def site_callback(update, context):
             'photo_url': photo_url
         })
         site_name = user[0]['site_names'][site_idx]
-        query.edit_message_text(f"Saved {site_name}. You can send another.")
+        query.edit_message_text(f"Saved photo for {site_name}. You can send another or stop for today.")
+        # Clear temporary data
+        context.user_data.pop('temp_photo_url', None)
     else:
         query.edit_message_text("Error. Please /start again.")
 
@@ -141,7 +146,19 @@ def check_reminders(context):
     for user in users:
         chat_id = user['telegram_chat_id']
         user_id = user['id']
-        today_start = datetime.now(local_tz).replace(hour=0, minute=0, second=0)
+        # Get or set start_date
+        start_date_str = user.get('start_date')
+        if start_date_str:
+            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).astimezone(local_tz)
+        else:
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            supabase_insert("users", {'id': user_id, 'start_date': start_date.isoformat()})
+        days_since_start = (now.date() - start_date.date()).days
+        day_number = days_since_start + 1
+        if day_number < 1:
+            day_number = 1
+        # Check if already uploaded today
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         today_start_utc = today_start.astimezone(pytz.UTC)
         photos = supabase_select("photos", {"user_id": user_id})
         has_photo_today = any(
@@ -149,11 +166,11 @@ def check_reminders(context):
             for p in photos
         )
         if not has_photo_today:
-            # Calculate day number (optional, but keep simple for now)
-            context.bot.send_message(chat_id, "Time to document your melasma spots. Send a photo.")
+            message = f"Day {day_number} in fighting dark spots with Hyperbeam, let's upload your progress (pictures of the same five melasma spots)."
+            context.bot.send_message(chat_id, message)
 
 def main():
-    print("Bot starting (sync v2)...")
+    print("Bot is now polling...")
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
